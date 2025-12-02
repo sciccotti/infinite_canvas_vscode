@@ -63,7 +63,7 @@
         "*.canvas": "canvas"
       },
       "workbench.editorAssociations": {
-        "*.canvas": "default"
+        "*.canvas": "infinite-canvas.canvasEditor"
       }
     },
     "commands": [

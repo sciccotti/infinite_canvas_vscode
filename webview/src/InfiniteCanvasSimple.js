@@ -1,6 +1,38 @@
 // Simplified Infinite Canvas for VS Code Extension
 // Core functionality with AI integrations
 
+// Color helpers
+function hexToRgb(hex) {
+    if (!hex) return null;
+    const normalized = hex.replace('#', '');
+    if (normalized.length !== 6) return null;
+    const bigint = parseInt(normalized, 16);
+    return {
+        r: (bigint >> 16) & 255,
+        g: (bigint >> 8) & 255,
+        b: bigint & 255
+    };
+}
+
+function getContrastingTextColor(bgColor) {
+    const rgb = hexToRgb(bgColor);
+    if (!rgb) return '#ffffff';
+    const { r, g, b } = rgb;
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.6 ? '#111111' : '#ffffff';
+}
+
+function adjustColorLuminance(hex, amount = -0.2) {
+    const rgb = hexToRgb(hex);
+    if (!rgb) return hex;
+    const clamp = (v) => Math.min(255, Math.max(0, v));
+    const factor = 1 + amount;
+    const r = clamp(Math.round(rgb.r * factor));
+    const g = clamp(Math.round(rgb.g * factor));
+    const b = clamp(Math.round(rgb.b * factor));
+    return `#${[r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
 export class InfiniteCanvas {
     constructor(canvasId) {
         // Configuration
@@ -290,6 +322,39 @@ class CanvasState {
         this.notifyStateChange();
         return node;
     }
+
+    cloneNode(node, offsetX = 20, offsetY = 20) {
+        if (!node) return null;
+        const isFileNode = node.type === 'file';
+        const cloned = {
+            id: `${isFileNode ? 'file' : 'node'}_${++this.nodeCounter}`,
+            type: node.type || 'text',
+            x: node.x + offsetX,
+            y: node.y + offsetY,
+            width: node.width,
+            height: node.height,
+            maxHeight: node.maxHeight,
+            scrollY: node.scrollY || 0,
+            isSelected: false,
+            backgroundColor: node.backgroundColor,
+            textColor: node.textColor || getContrastingTextColor(node.backgroundColor),
+            borderColor: node.borderColor || adjustColorLuminance(node.backgroundColor, -0.25)
+        };
+        
+        if (isFileNode) {
+            cloned.file = node.file;
+            cloned.content = node.content;
+            cloned.isContentLoaded = node.isContentLoaded;
+            cloned.isEditing = false;
+            cloned.lastModified = node.lastModified;
+        } else {
+            cloned.text = node.text;
+        }
+        
+        this.nodes.push(cloned);
+        this.notifyStateChange();
+        return cloned;
+    }
     
     async loadFileContent(fileNode) {
         try {
@@ -456,6 +521,88 @@ class CanvasState {
         }
     }
     
+    alignSelectedNodes(mode) {
+        if (!this.selectedNodes || this.selectedNodes.length < 2) return;
+        
+        const minX = Math.min(...this.selectedNodes.map(n => n.x));
+        const maxX = Math.max(...this.selectedNodes.map(n => n.x + n.width));
+        const minY = Math.min(...this.selectedNodes.map(n => n.y));
+        const maxY = Math.max(...this.selectedNodes.map(n => n.y + n.height));
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+        
+        this.selectedNodes.forEach(node => {
+            switch (mode) {
+                case 'align-left':
+                    node.x = minX;
+                    break;
+                case 'align-right':
+                    node.x = maxX - node.width;
+                    break;
+                case 'align-h-center':
+                    node.x = centerX - node.width / 2;
+                    break;
+                case 'align-top':
+                    node.y = minY;
+                    break;
+                case 'align-bottom':
+                    node.y = maxY - node.height;
+                    break;
+                case 'align-v-center':
+                    node.y = centerY - node.height / 2;
+                    break;
+            }
+        });
+        
+        this.notifyStateChange();
+    }
+    
+    shouldShowAlignmentControls() {
+        return this.selectedNodes && this.selectedNodes.length > 1;
+    }
+
+    distributeSelectedNodes(mode) {
+        if (!this.selectedNodes || this.selectedNodes.length < 3) return;
+        if (mode === 'distribute-h') {
+            const sorted = [...this.selectedNodes].sort((a, b) => a.x - b.x);
+            const minX = Math.min(...sorted.map(n => n.x));
+            const maxX = Math.max(...sorted.map(n => n.x + n.width));
+            const totalWidth = sorted.reduce((sum, n) => sum + n.width, 0);
+            const available = maxX - minX - totalWidth;
+            const gap = available > 0 ? available / (sorted.length - 1) : 0;
+            let cursor = minX;
+            sorted.forEach((node, index) => {
+                if (index === 0) {
+                    node.x = minX;
+                } else if (index === sorted.length - 1) {
+                    node.x = maxX - node.width;
+                } else {
+                    cursor += (sorted[index - 1].width) + gap;
+                    node.x = cursor;
+                }
+            });
+        } else if (mode === 'distribute-v') {
+            const sorted = [...this.selectedNodes].sort((a, b) => a.y - b.y);
+            const minY = Math.min(...sorted.map(n => n.y));
+            const maxY = Math.max(...sorted.map(n => n.y + n.height));
+            const totalHeight = sorted.reduce((sum, n) => sum + n.height, 0);
+            const available = maxY - minY - totalHeight;
+            const gap = available > 0 ? available / (sorted.length - 1) : 0;
+            let cursor = minY;
+            sorted.forEach((node, index) => {
+                if (index === 0) {
+                    node.y = minY;
+                } else if (index === sorted.length - 1) {
+                    node.y = maxY - node.height;
+                } else {
+                    cursor += (sorted[index - 1].height) + gap;
+                    node.y = cursor;
+                }
+            });
+        }
+        this.notifyStateChange();
+    }
+    
     selectMultipleNodes(nodes) {
         // Clear previous selection
         this.clearSelection();
@@ -499,7 +646,10 @@ class CanvasState {
                     y: node.y,
                     width: node.width,
                     height: node.height,
-                    type: node.type || "text"
+                    type: node.type || "text",
+                    backgroundColor: node.backgroundColor,
+                    textColor: node.textColor,
+                    borderColor: node.borderColor
                 };
                 
                 if (node.type === 'file') {
@@ -561,9 +711,9 @@ class CanvasState {
                         maxHeight: nodeData.maxHeight || (isFileNode ? 400 : 120),
                         scrollY: nodeData.scrollY || 0,
                         isSelected: false,
-                        backgroundColor: isFileNode ? '#2d2d2d' : '#3c3c3c',
-                        textColor: '#cccccc',
-                        borderColor: isFileNode ? '#4a5568' : '#414141'
+                        backgroundColor: nodeData.backgroundColor || (isFileNode ? '#2d2d2d' : '#3c3c3c'),
+                        textColor: nodeData.textColor || getContrastingTextColor(nodeData.backgroundColor || (isFileNode ? '#2d2d2d' : '#3c3c3c')),
+                        borderColor: nodeData.borderColor || adjustColorLuminance(nodeData.backgroundColor || (isFileNode ? '#2d2d2d' : '#3c3c3c'), -0.25)
                     };
                     
                     if (isFileNode) {
@@ -673,10 +823,19 @@ class InputHandler {
         this.dragStartX = 0;
         this.dragStartY = 0;
         this.hasMoved = false;
+        this.dragStartMouseX = 0;
+        this.dragStartMouseY = 0;
+        this.draggedNodesStartPositions = [];
+        this.axisLock = null;
+        this.axisLockBaselinePositions = [];
+        this.isCloningDrag = false;
         
         // Connection functionality
         this.isConnecting = false;
         this.connectionStart = null;
+        this.connectionStartPoint = null; // { x, y, side, nodeId }
+        this.hoveredConnectionHandle = null; // { x, y, side, nodeId, distance }
+        this.reanchorConnection = null;
         
         // Scrollbar functionality
         this.isDraggingScrollbar = false;
@@ -691,7 +850,6 @@ class InputHandler {
         this.resizeStartY = 0;
         this.resizeStartWidth = 0;
         this.resizeStartHeight = 0;
-        this.connectionStartPoint = null;
         this.hoveredNode = null;
         this.hoveredConnectionPoint = null;
         
@@ -811,9 +969,40 @@ class InputHandler {
         // Convert to canvas coordinates
         const canvasX = (mouseX - this.canvasState.offsetX) / this.canvasState.scale;
         const canvasY = (mouseY - this.canvasState.offsetY) / this.canvasState.scale;
+
+        // Refresh hovered connection handle at click time
+        const hoveredHandle = this.getNearestConnectionHandle(canvasX, canvasY, 24);
+        this.hoveredConnectionHandle = hoveredHandle;
         
         const clickedNode = this.canvasState.getNodeAt(canvasX, canvasY);
         console.log('🎯 Mouse down on node:', clickedNode ? clickedNode.id : 'background');
+
+        // Connection handle click takes priority
+        if (hoveredHandle) {
+            const handleNode = this.canvasState.nodes.find(n => n.id === hoveredHandle.nodeId);
+            if (this.canvasState.selectedConnection) {
+                // Prepare to reanchor selected connection on mouse up
+                this.reanchorConnection = this.canvasState.selectedConnection;
+                this.reanchorTargetHandle = hoveredHandle;
+                console.log('🎯 Reanchor mode for connection:', this.reanchorConnection.id, 'target handle', hoveredHandle.side, 'on', hoveredHandle.nodeId);
+            } else if (handleNode) {
+                console.log('🔗 Starting connection from handle (hold to complete):', hoveredHandle.side, 'on', handleNode.id);
+                this.isConnecting = true;
+                this.connectionStart = handleNode;
+                this.connectionStartPoint = hoveredHandle;
+                this.canvasState.clearSelection();
+                this.isDragging = false;
+            }
+            return;
+        } else if (this.isConnecting) {
+            // Clicked empty space while connecting -> cancel
+            console.log('❌ Connection cancelled (clicked empty space)');
+            this.isConnecting = false;
+            this.connectionStart = null;
+            this.connectionStartPoint = null;
+            this.canvas.style.cursor = 'default';
+            return;
+        }
         
         // Check if clicking on connection first
         if (!clickedNode) {
@@ -827,20 +1016,6 @@ class InputHandler {
         }
         
         if (clickedNode) {
-            // Check if clicking on a connection point first when Shift is held (priority for connections)
-            const connectionPoint = this.getConnectionPointAt(clickedNode, canvasX, canvasY);
-            
-            if (e.shiftKey && connectionPoint) {
-                // Start connection - this takes priority over resize when Shift is held
-                console.log('🔗 Starting connection from:', clickedNode.id, connectionPoint.side);
-                this.isConnecting = true;
-                this.connectionStart = clickedNode;
-                this.connectionStartPoint = connectionPoint;
-                this.canvasState.clearSelection();
-                this.isDragging = false;
-                return;
-            }
-            
             // Check if clicking on resize handle (only if not connecting)
             const resizeHandle = clickedNode._resizeHandles?.find(handle =>
                 canvasX >= handle.x && canvasX <= handle.x + handle.width &&
@@ -892,26 +1067,31 @@ class InputHandler {
             
             
             // Normal node interaction - handle multi-selection
+            const wasSelected = clickedNode.isSelected;
             if (e.ctrlKey || e.metaKey) {
                 // Ctrl/Cmd + click: toggle selection
                 this.canvasState.toggleSelection(clickedNode);
                 console.log('🔄 Node selection toggled:', clickedNode.id, 'Total selected:', this.canvasState.selectedNodes.length);
-            } else if (e.shiftKey && this.canvasState.selectedNodes.length > 0) {
-                // Shift + click: add to selection
+            } else if (e.shiftKey) {
+                // Shift + click: add to selection (or select if none)
                 this.canvasState.addToSelection(clickedNode);
                 console.log('➕ Node added to selection:', clickedNode.id, 'Total selected:', this.canvasState.selectedNodes.length);
+            } else if (this.canvasState.selectedNodes.length > 1 && wasSelected) {
+                // Keep current multi-selection when clicking an already-selected node
+                console.log('🔒 Keeping existing multi-selection');
             } else {
                 // Normal click: single selection
                 this.canvasState.selectNode(clickedNode);
                 console.log('✅ Node selected:', clickedNode.id, 'Total selected:', this.canvasState.selectedNodes.length);
             }
             
-            // Only start dragging if the node is selected
+            // Start dragging if the node is selected
             if (clickedNode.isSelected) {
-                this.isNodeDragging = true;
-                this.draggedNode = clickedNode;
-                this.dragStartX = canvasX - clickedNode.x;
-                this.dragStartY = canvasY - clickedNode.y;
+                if (e.altKey) {
+                    this.startCloningDrag(clickedNode, canvasX, canvasY);
+                } else {
+                    this.beginNodeDrag(clickedNode, canvasX, canvasY);
+                }
             }
         } else {
             // Clicking on empty space - determine action based on input method
@@ -955,11 +1135,15 @@ class InputHandler {
         const canvasX = (mouseX - this.canvasState.offsetX) / this.canvasState.scale;
         const canvasY = (mouseY - this.canvasState.offsetY) / this.canvasState.scale;
         
-        // Update hover state
-        this.hoveredNode = this.canvasState.getNodeAt(canvasX, canvasY);
-        if (this.hoveredNode) {
-            this.hoveredConnectionPoint = this.getConnectionPointAt(this.hoveredNode, canvasX, canvasY);
+        // Determine closest connection handle for hover/click (single winner)
+        this.hoveredConnectionHandle = this.getNearestConnectionHandle(canvasX, canvasY, 24);
+        
+        // Update hover state (prefer the node owning the hovered connection handle)
+        if (this.hoveredConnectionHandle) {
+            this.hoveredNode = this.canvasState.nodes.find(n => n.id === this.hoveredConnectionHandle.nodeId) || null;
+            this.hoveredConnectionPoint = this.hoveredConnectionHandle;
         } else {
+            this.hoveredNode = this.canvasState.getNodeAt(canvasX, canvasY);
             this.hoveredConnectionPoint = null;
         }
         
@@ -970,7 +1154,7 @@ class InputHandler {
             this.canvas.style.cursor = 'grabbing';
         } else if (this.isConnecting) {
             this.canvas.style.cursor = 'crosshair';
-        } else if (this.hoveredConnectionPoint && e.shiftKey) {
+        } else if (this.hoveredConnectionHandle) {
             this.canvas.style.cursor = 'copy';
         } else if (this.hoveredNode) {
             // Check for resize handle hover
@@ -1097,13 +1281,48 @@ class InputHandler {
                 
             } else if (this.isNodeDragging && this.draggedNode) {
                 // Move selected nodes as a group
-                const deltaX = (canvasX - this.dragStartX) - this.draggedNode.x;
-                const deltaY = (canvasY - this.dragStartY) - this.draggedNode.y;
+                const deltaX = canvasX - this.dragStartMouseX;
+                const deltaY = canvasY - this.dragStartMouseY;
                 
-                // Move all selected nodes
+                // Set up axis lock when Shift is pressed during drag
+                if (e.shiftKey) {
+                    if (!this.axisLock) {
+                        this.axisLock = Math.abs(deltaX) >= Math.abs(deltaY) ? 'x' : 'y';
+                        this.axisLockBaselinePositions = this.canvasState.selectedNodes.map(node => ({
+                            id: node.id,
+                            x: node.x,
+                            y: node.y
+                        }));
+                    }
+                } else {
+                    this.axisLock = null;
+                    this.axisLockBaselinePositions = [];
+                }
+                
+                let effectiveDeltaX = deltaX;
+                let effectiveDeltaY = deltaY;
+                
+                // Freeze the locked axis at the position when lock was engaged
+                if (this.axisLock === 'x') {
+                    effectiveDeltaY = 0;
+                } else if (this.axisLock === 'y') {
+                    effectiveDeltaX = 0;
+                }
+                
+                // Move all selected nodes relative to their start positions
                 this.canvasState.selectedNodes.forEach(node => {
-                    node.x += deltaX;
-                    node.y += deltaY;
+                    const startPos = this.draggedNodesStartPositions.find(p => p.id === node.id);
+                    const lockBase = this.axisLockBaselinePositions.find(p => p.id === node.id) || startPos;
+                    if (startPos) {
+                        node.x = startPos.x + effectiveDeltaX;
+                        node.y = startPos.y + effectiveDeltaY;
+                        
+                        if (this.axisLock === 'x' && lockBase) {
+                            node.y = lockBase.y;
+                        } else if (this.axisLock === 'y' && lockBase) {
+                            node.x = lockBase.x;
+                        }
+                    }
                 });
                 
                 this.canvasState.notifyStateChange();
@@ -1129,8 +1348,96 @@ class InputHandler {
         this.lastMouseY = mouseY;
     }
     
+    beginNodeDrag(clickedNode, canvasX, canvasY) {
+        this.isNodeDragging = true;
+        this.draggedNode = clickedNode;
+        this.dragStartMouseX = canvasX;
+        this.dragStartMouseY = canvasY;
+        this.draggedNodesStartPositions = this.canvasState.selectedNodes.map(node => ({
+            id: node.id,
+            x: node.x,
+            y: node.y
+        }));
+        this.axisLock = null;
+        this.axisLockBaselinePositions = [];
+        this.hasMoved = false;
+    }
+    
+    startCloningDrag(clickedNode, canvasX, canvasY) {
+        const sourceNodes = this.canvasState.selectedNodes.length > 0 ? this.canvasState.selectedNodes : [clickedNode];
+        const clonedNodes = [];
+        const cloneMap = new Map();
+        
+        sourceNodes.forEach(node => {
+            const clone = this.canvasState.cloneNode(node, 30, 30);
+            if (clone) {
+                clonedNodes.push(clone);
+                cloneMap.set(node.id, clone);
+                // Auto-connect clone to original using shortest handle pair
+                this.createShortestConnectionBetween(node, clone);
+            }
+        });
+        
+        if (clonedNodes.length > 0) {
+            this.canvasState.selectMultipleNodes(clonedNodes);
+            const primaryClone = cloneMap.get(clickedNode.id) || clonedNodes[0];
+            this.beginNodeDrag(primaryClone, canvasX, canvasY);
+        }
+        
+        this.isCloningDrag = true;
+    }
+    
+    createShortestConnectionBetween(nodeA, nodeB) {
+        const pointsA = this.getConnectionPoints(nodeA);
+        const pointsB = this.getConnectionPoints(nodeB);
+        let best = null;
+        let bestDistance = Infinity;
+        
+        pointsA.forEach(pa => {
+            pointsB.forEach(pb => {
+                const dist = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+                if (dist < bestDistance) {
+                    bestDistance = dist;
+                    best = { from: pa, to: pb };
+                }
+            });
+        });
+        
+        if (best) {
+            this.canvasState.createConnection(nodeA, nodeB, best.from.side, best.to.side);
+        }
+    }
+    
+    applyNodeBackground(node, color) {
+        if (!node || !color) return;
+        node.backgroundColor = color;
+        node.textColor = getContrastingTextColor(color);
+        node.borderColor = adjustColorLuminance(color, -0.25);
+        
+        this.canvasState.notifyStateChange();
+        if (this.requestRender) {
+            this.requestRender();
+        }
+    }
+    
+    applyColorToSelection(color) {
+        if (!color) return;
+        const nodes = this.canvasState.selectedNodes || [];
+        if (!nodes.length) return;
+        nodes.forEach(n => {
+            n.backgroundColor = color;
+            n.textColor = getContrastingTextColor(color);
+            n.borderColor = adjustColorLuminance(color, -0.25);
+        });
+        this.canvasState.notifyStateChange();
+        if (this.requestRender) {
+            this.requestRender();
+        }
+    }
+    
     handleMouseUp(e) {
         console.log('🖱️ Mouse up - was dragging:', this.isDragging, 'was node dragging:', this.isNodeDragging, 'was connecting:', this.isConnecting, 'was scrollbar dragging:', this.isDraggingScrollbar);
+        const movedNodes = (this.isNodeDragging && this.hasMoved) ? [...this.canvasState.selectedNodes] : [];
         
         // Handle resize completion
         if (this.isResizing) {
@@ -1154,7 +1461,7 @@ class InputHandler {
             return;
         }
         
-        // Handle connection completion
+        // Handle connection completion/cancel
         if (this.isConnecting && this.connectionStart) {
             const rect = this.canvas.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
@@ -1162,21 +1469,20 @@ class InputHandler {
             const canvasX = (mouseX - this.canvasState.offsetX) / this.canvasState.scale;
             const canvasY = (mouseY - this.canvasState.offsetY) / this.canvasState.scale;
             
-            const targetNode = this.canvasState.getNodeAt(canvasX, canvasY);
-            
-            if (targetNode && targetNode !== this.connectionStart) {
-                const targetConnectionPoint = this.getConnectionPointAt(targetNode, canvasX, canvasY);
-                
-                console.log('🔗 Completing connection to:', targetNode.id, targetConnectionPoint ? targetConnectionPoint.side : 'auto');
-                
-                this.canvasState.createConnection(
-                    this.connectionStart, 
-                    targetNode, 
-                    this.connectionStartPoint ? this.connectionStartPoint.side : null,
-                    targetConnectionPoint ? targetConnectionPoint.side : null
-                );
+            const releaseHandle = this.getNearestConnectionHandle(canvasX, canvasY, 24);
+            if (releaseHandle && !(releaseHandle.nodeId === this.connectionStart.id && releaseHandle.side === this.connectionStartPoint?.side)) {
+                const targetNode = this.canvasState.nodes.find(n => n.id === releaseHandle.nodeId);
+                if (targetNode) {
+                    console.log('🔗 Completing connection (mouse held) to handle:', releaseHandle.side, 'on', targetNode.id);
+                    this.canvasState.createConnection(
+                        this.connectionStart,
+                        targetNode,
+                        this.connectionStartPoint ? this.connectionStartPoint.side : null,
+                        releaseHandle.side || null
+                    );
+                }
             } else {
-                console.log('❌ Connection cancelled - no valid target');
+                console.log('❌ Connection cancelled (mouse released off handle)');
             }
             
             // Reset connection state
@@ -1184,6 +1490,48 @@ class InputHandler {
             this.connectionStart = null;
             this.connectionStartPoint = null;
             this.canvas.style.cursor = 'default';
+        }
+        
+        // Reanchor selected connection to a handle on mouse up (click-release)
+        if (!this.isConnecting && this.reanchorConnection) {
+            const rect = this.canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            const canvasX = (mouseX - this.canvasState.offsetX) / this.canvasState.scale;
+            const canvasY = (mouseY - this.canvasState.offsetY) / this.canvasState.scale;
+            
+            const releaseHandle = this.getNearestConnectionHandle(canvasX, canvasY, 24);
+            if (releaseHandle) {
+                const conn = this.reanchorConnection;
+                const fromNode = this.canvasState.nodes.find(n => n.id === conn.from);
+                const toNode = this.canvasState.nodes.find(n => n.id === conn.to);
+                if (fromNode && toNode) {
+                    const fromPoint = this.getPointForSide(fromNode, conn.fromSide || 'right');
+                    const toPoint = this.getPointForSide(toNode, conn.toSide || 'left');
+                    const distFrom = Math.hypot(fromPoint.x - releaseHandle.x, fromPoint.y - releaseHandle.y);
+                    const distTo = Math.hypot(toPoint.x - releaseHandle.x, toPoint.y - releaseHandle.y);
+                    
+                    if (distFrom <= distTo) {
+                        conn.from = releaseHandle.nodeId;
+                        conn.fromNode = this.canvasState.nodes.find(n => n.id === releaseHandle.nodeId);
+                        conn.fromSide = releaseHandle.side;
+                    } else {
+                        conn.to = releaseHandle.nodeId;
+                        conn.toNode = this.canvasState.nodes.find(n => n.id === releaseHandle.nodeId);
+                        conn.toSide = releaseHandle.side;
+                    }
+                    
+                    this.canvasState.notifyStateChange();
+                    if (this.requestRender) {
+                        this.requestRender();
+                    }
+                    console.log('🔀 Reanchored connection', conn.id, 'to handle', releaseHandle.side, 'on', releaseHandle.nodeId);
+                }
+            } else {
+                console.log('❌ Reanchor cancelled (no handle on release)');
+            }
+            this.reanchorConnection = null;
+            this.reanchorTargetHandle = null;
         }
         
         // Handle selection rectangle completion
@@ -1218,10 +1566,13 @@ class InputHandler {
             this.selectionRect = null;
         }
         
-        // If we weren't really dragging (just a click), ensure selection is maintained
+        // If we weren't really dragging (just a click), ensure selection is maintained without clearing multi-select
         if (this.draggedNode && !this.hasMoved) {
-            console.log('👆 Simple click on node, ensuring selection');
-            this.canvasState.selectNode(this.draggedNode);
+            console.log('👆 Simple click on node, maintaining current selection');
+            // Only force selection if the node somehow isn't selected
+            if (!this.draggedNode.isSelected) {
+                this.canvasState.selectNode(this.draggedNode);
+            }
         }
         
         this.isDragging = false;
@@ -1229,6 +1580,14 @@ class InputHandler {
         this.isPanning = false;
         this.draggedNode = null;
         this.hasMoved = false;
+        this.axisLock = null;
+        this.axisLockBaselinePositions = [];
+        this.isCloningDrag = false;
+        
+        // After drag, snap connection sides to shortest paths for moved nodes
+        if (movedNodes.length > 0) {
+            this.recomputeConnectionSidesForNodes(movedNodes);
+        }
     }
     
     handleWheel(e) {
@@ -1376,6 +1735,7 @@ class InputHandler {
             console.log('➕ Creating new node at:', { x: canvasX - 100, y: canvasY - 50 });
             const newNode = this.canvasState.createNode('New Node', canvasX - 100, canvasY - 50);
             console.log('🎉 New node created:', newNode);
+            this.editNodeText(newNode);
         }
     }
     
@@ -1526,6 +1886,7 @@ class InputHandler {
         `;
         
         document.body.appendChild(textarea);
+
         textarea.focus();
         textarea.select();
         
@@ -1538,7 +1899,9 @@ class InputHandler {
                 node.text = textarea.value || 'New Node';
                 node.isEditing = false;
                 document.body.removeChild(textarea);
-                
+                if (paletteContainer && document.body.contains(paletteContainer)) {
+                    document.body.removeChild(paletteContainer);
+                }
                 // Force immediate save to VS Code like file nodes do
                 await this.canvasState.saveCanvasState();
                 console.log('✏️ Node text updated to:', node.text);
@@ -1549,6 +1912,9 @@ class InputHandler {
             if (document.body.contains(textarea)) {
                 node.isEditing = false;
                 document.body.removeChild(textarea);
+                if (paletteContainer && document.body.contains(paletteContainer)) {
+                    document.body.removeChild(paletteContainer);
+                }
                 this.canvasState.notifyStateChange();
             }
         };
@@ -1591,7 +1957,9 @@ class InputHandler {
             e.stopPropagation();
         });
         
-        textarea.addEventListener('blur', finishEditing);
+        textarea.addEventListener('blur', () => {
+            finishEditing();
+        });
         
         // Auto-resize to fit content
         const autoResize = () => {
@@ -2082,17 +2450,77 @@ class InputHandler {
         ];
     }
     
-    getConnectionPointAt(node, x, y) {
-        const points = this.getConnectionPoints(node);
-        const pointRadius = 16; // Detection radius
+    // Find the nearest connection handle (across all nodes) within the enlarged radius
+    getNearestConnectionHandle(x, y, radius = 24) {
+        let closest = null;
+        let closestDistance = Infinity;
         
-        for (const point of points) {
-            const distance = Math.sqrt(Math.pow(x - point.x, 2) + Math.pow(y - point.y, 2));
-            if (distance <= pointRadius) {
-                return point;
+        this.canvasState.nodes.forEach(node => {
+            const points = this.getConnectionPoints(node);
+            points.forEach(point => {
+                const distance = Math.hypot(x - point.x, y - point.y);
+                if (distance <= radius && distance < closestDistance) {
+                    closestDistance = distance;
+                    closest = { ...point, nodeId: node.id, distance };
+                }
+            });
+        });
+        
+        return closest;
+    }
+    
+    getPointForSide(node, side) {
+        if (!node || !side) return { x: node ? node.x + node.width / 2 : 0, y: node ? node.y + node.height / 2 : 0 };
+        const points = this.getConnectionPoints(node);
+        const match = points.find(p => p.side === side);
+        return match || { x: node.x + node.width / 2, y: node.y + node.height / 2 };
+    }
+
+    getShortestConnectionPoints(fromNode, toNode) {
+        const fromPoints = this.getConnectionPoints(fromNode);
+        const toPoints = this.getConnectionPoints(toNode);
+        let best = null;
+        let bestDistance = Infinity;
+        
+        fromPoints.forEach(fp => {
+            toPoints.forEach(tp => {
+                const dist = Math.hypot(fp.x - tp.x, fp.y - tp.y);
+                if (dist < bestDistance) {
+                    bestDistance = dist;
+                    best = { from: fp, to: tp };
+                }
+            });
+        });
+        return best;
+    }
+    
+    recomputeConnectionSidesForNodes(nodeIdsOrNodes) {
+        const ids = new Set((nodeIdsOrNodes || []).map(n => typeof n === 'string' ? n : n.id));
+        if (ids.size === 0) return;
+        let changed = false;
+        
+        this.canvasState.connections.forEach(conn => {
+            if (ids.has(conn.from) || ids.has(conn.to)) {
+                const fromNode = this.canvasState.nodes.find(n => n.id === conn.from);
+                const toNode = this.canvasState.nodes.find(n => n.id === conn.to);
+                if (!fromNode || !toNode) return;
+                const best = this.getShortestConnectionPoints(fromNode, toNode);
+                if (best) {
+                    conn.fromSide = best.from.side;
+                    conn.toSide = best.to.side;
+                    conn.fromNode = fromNode;
+                    conn.toNode = toNode;
+                    changed = true;
+                }
+            }
+        });
+        
+        if (changed) {
+            this.canvasState.notifyStateChange();
+            if (this.requestRender) {
+                this.requestRender();
             }
         }
-        return null;
     }
     
     getConnectionAtPoint(x, y, tolerance = 8) {
@@ -2177,6 +2605,8 @@ class InputHandler {
         this.resizeNode = null;
         this.resizeHandle = null;
         this.scrollbarDragNode = null;
+        this.reanchorConnection = null;
+        this.reanchorTargetHandle = null;
         
         // Update cursor
         this.canvas.style.cursor = 'default';
@@ -2406,9 +2836,12 @@ class CanvasRenderer {
         
         // Draw nodes
         canvasState.nodes.forEach(node => {
+            const isConnectionEndpoint = canvasState.selectedConnection && 
+                (canvasState.selectedConnection.from === node.id || canvasState.selectedConnection.to === node.id);
             const showConnectionPoints = node.isSelected || 
                 (inputHandler.hoveredNode === node && inputHandler.hoveredConnectionPoint) ||
-                inputHandler.isConnecting;
+                inputHandler.isConnecting ||
+                isConnectionEndpoint;
             
             if (node.type === 'file') {
                 this.drawFileNode(ctx, node, showConnectionPoints, inputHandler);
@@ -3293,19 +3726,22 @@ class CanvasRenderer {
         
         points.forEach(point => {
             // Check if this point is being hovered
-            const isHovered = inputHandler && inputHandler.hoveredConnectionPoint && 
-                             inputHandler.hoveredConnectionPoint.side === point.side;
+            const isHovered = inputHandler && inputHandler.hoveredConnectionHandle && 
+                             inputHandler.hoveredConnectionHandle.side === point.side &&
+                             inputHandler.hoveredConnectionHandle.nodeId === node.id;
+            const isConnectionEndpoint = inputHandler && inputHandler.canvasState && inputHandler.canvasState.selectedConnection &&
+                (inputHandler.canvasState.selectedConnection.from === node.id || inputHandler.canvasState.selectedConnection.to === node.id);
             
-            const currentRadius = isHovered ? pointRadius + 4 : pointRadius;
+            const currentRadius = isHovered ? pointRadius * 2 : pointRadius;
             
             // Draw connection point with glow effect
-            ctx.shadowColor = 'rgba(34, 197, 94, 0.8)';
+            ctx.shadowColor = isConnectionEndpoint ? 'rgba(249, 115, 22, 0.9)' : 'rgba(34, 197, 94, 0.8)';
             ctx.shadowBlur = isHovered ? 20 : 12;
             ctx.shadowOffsetX = 0;
             ctx.shadowOffsetY = 0;
             
             // Outer circle
-            ctx.fillStyle = isHovered ? '#10b981' : '#22c55e';
+            ctx.fillStyle = isConnectionEndpoint ? '#f97316' : (isHovered ? '#10b981' : '#22c55e');
             ctx.beginPath();
             ctx.arc(point.x, point.y, currentRadius, 0, 2 * Math.PI);
             ctx.fill();
@@ -3397,6 +3833,7 @@ class UIManager {
         this.createFloatingViewButton();
         this.createNotificationContainer();
         this.createConfigButton();
+        this.createAlignmentControls();
         this.createConfigPanel();
         console.log('🎨 UI Manager setup completed');
     }
@@ -4096,6 +4533,145 @@ class UIManager {
         document.body.appendChild(container);
     }
     
+    createAlignmentControls() {
+        const container = document.createElement('div');
+        container.id = 'alignment-controls';
+        container.style.cssText = `
+            position: fixed;
+            top: 20px;
+            left: 70px;
+            display: flex;
+            gap: 6px;
+            z-index: 1001;
+            background: rgba(30, 30, 30, 0.85);
+            border: 1px solid #555;
+            border-radius: 8px;
+            padding: 6px 8px;
+            backdrop-filter: blur(10px);
+        `;
+        
+        const buttonStyle = `
+            width: 32px;
+            height: 32px;
+            border: 1px solid #666;
+            border-radius: 6px;
+            background: rgba(45, 45, 45, 0.9);
+            color: #e0e0e0;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+        `;
+        
+        const makeBtn = (label, title, mode) => {
+            const btn = document.createElement('button');
+            btn.textContent = label;
+            btn.title = title;
+            btn.style.cssText = buttonStyle;
+            btn.addEventListener('mouseenter', () => {
+                btn.style.background = 'rgba(60, 60, 60, 0.95)';
+            });
+            btn.addEventListener('mouseleave', () => {
+                btn.style.background = 'rgba(45, 45, 45, 0.9)';
+            });
+            btn.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (mode === 'distribute-h' || mode === 'distribute-v') {
+                    this.canvas.canvasState.distributeSelectedNodes(mode);
+                } else {
+                    this.canvas.canvasState.alignSelectedNodes(mode);
+                }
+                this.canvas.inputHandler.resetDragState();
+            });
+            return btn;
+        };
+        
+        // Vertical group
+        const vTop = makeBtn('⤒', 'Align top', 'align-top');
+        const vMid = makeBtn('↕', 'Align middle vertically', 'align-v-center');
+        const vBot = makeBtn('⤓', 'Align bottom', 'align-bottom');
+        // Horizontal group
+        const hLeft = makeBtn('⟸', 'Align left', 'align-left');
+        const hMid = makeBtn('↔', 'Align middle horizontally', 'align-h-center');
+        const hRight = makeBtn('⟹', 'Align right', 'align-right');
+        // Distribution
+        const distH = makeBtn('⇔', 'Distribute horizontally', 'distribute-h');
+        const distV = makeBtn('⇕', 'Distribute vertically', 'distribute-v');
+        
+        const group = document.createElement('div');
+        group.style.display = 'flex';
+        group.style.gap = '4px';
+        [vTop, vMid, vBot, hLeft, hMid, hRight, distH, distV].forEach(btn => group.appendChild(btn));
+        this.alignmentGroup = group;
+        
+        // Color palette for selection
+        const paletteContainer = document.createElement('div');
+        paletteContainer.style.display = 'flex';
+        paletteContainer.style.gap = '6px';
+        paletteContainer.style.marginLeft = '8px';
+        const paletteColors = ['#3c3c3c', '#1f2937', '#2563eb', '#16a34a', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#e5e7eb'];
+        const swatchStyle = `
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.5);
+            cursor: pointer;
+            padding: 0;
+            background: transparent;
+        `;
+        const makeSwatch = (color, isPicker = false) => {
+            const el = document.createElement(isPicker ? 'input' : 'button');
+            if (isPicker) {
+                el.type = 'color';
+                el.value = color;
+            } else {
+                el.style.background = color;
+            }
+            el.style.cssText = swatchStyle;
+            if (!isPicker) {
+                // Re-apply background after cssText to ensure it is visible
+                el.style.background = color;
+            } else {
+                // Make picker look like a gradient swatch
+                el.style.backgroundImage = 'linear-gradient(135deg, #3c3c3c, #2563eb, #16a34a, #f59e0b, #ef4444, #8b5cf6, #14b8a6)';
+                el.style.border = '2px solid rgba(255,255,255,0.6)';
+                el.style.appearance = 'none';
+            }
+            el.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+            el.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!isPicker) {
+                    this.canvas.inputHandler.applyColorToSelection(color);
+                    this.canvas.inputHandler.resetDragState();
+                }
+            });
+            if (isPicker) {
+                el.addEventListener('input', (e) => {
+                    this.canvas.inputHandler.applyColorToSelection(e.target.value);
+                    this.canvas.inputHandler.resetDragState();
+                });
+            }
+            return el;
+        };
+        paletteColors.forEach(c => paletteContainer.appendChild(makeSwatch(c)));
+        const customPicker = makeSwatch('#3c3c3c', true);
+        paletteContainer.appendChild(customPicker);
+        this.colorPaletteContainer = paletteContainer;
+        
+        container.appendChild(group);
+        container.appendChild(paletteContainer);
+        document.body.appendChild(container);
+        this.alignmentContainer = container;
+    }
+    
     updateModelSelection(model, isActive) {
         if (this.canvas.aiManager) {
             const activeModels = this.canvas.aiManager.activeModels;
@@ -4294,6 +4870,17 @@ class UIManager {
         if (!this.floatingGenerateBtn || !this.floatingViewBtn) return;
         
         const selectedNodes = this.canvas.canvasState.selectedNodes;
+        
+        // Show/hide alignment controls based on selection count
+        if (this.alignmentContainer) {
+            this.alignmentContainer.style.display = selectedNodes.length >= 1 ? 'flex' : 'none';
+            if (this.alignmentGroup) {
+                this.alignmentGroup.style.display = selectedNodes.length > 1 ? 'flex' : 'none';
+            }
+            if (this.colorPaletteContainer) {
+                this.colorPaletteContainer.style.display = selectedNodes.length >= 1 ? 'flex' : 'none';
+            }
+        }
         
         if (selectedNodes.length === 1) {
             const node = selectedNodes[0];

@@ -150,6 +150,13 @@ class VSCodeCanvasApp {
                     this.canvas.canvasState.loadCanvasData(canvasData);
                     console.log('✅ Loaded canvas content from VS Code');
                     
+                    // Force a render so visual state matches loaded data (e.g., undo color)
+                    if (this.canvas.requestRender) {
+                        this.canvas.requestRender();
+                    } else if (this.canvas.render) {
+                        this.canvas.render();
+                    }
+                    
                     // Re-enable state change notifications
                     this.canvas.canvasState.onStateChange = originalOnStateChange;
                 }
