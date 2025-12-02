@@ -137,9 +137,18 @@ export class InfiniteCanvas {
     resizeCanvas() {
         const container = this.canvas.parentElement;
         const rect = container.getBoundingClientRect();
-        
-        this.canvas.width = rect.width;
-        this.canvas.height = rect.height;
+        const dpr = window.devicePixelRatio || 1;
+
+        // Keep logical size for layout
+        this.canvas.style.width = `${rect.width}px`;
+        this.canvas.style.height = `${rect.height}px`;
+
+        // Backing store scaled for high-DPI displays to avoid blur
+        this.canvas.width = Math.round(rect.width * dpr);
+        this.canvas.height = Math.round(rect.height * dpr);
+
+        // Reset transform so subsequent draws use CSS pixel coordinates
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         
         // Force re-render
         if (this.requestRender) {
